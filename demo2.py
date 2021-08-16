@@ -9,6 +9,8 @@ from shapely.geometry import *
 import shapely
 from src.loftr import LoFTR, default_cfg
 from utils import *
+from filter_ad_units import *
+import datetime
 # The default config uses dual-softmax.
 # The outdoor and indoor models share the same config.
 # You can change the default values like thr and coarse_match_type.
@@ -16,10 +18,10 @@ from utils import *
 def Detect_process(img0_pth,img1_pth):
     matcher = LoFTR(config=default_cfg)
     matcher.load_state_dict(torch.load("weights/indoor_ds.ckpt")['state_dict'])
-    matcher = matcher.eval()
+    matcher = matcher.eval().cuda()
+    # Load example images
     t_img0 = cv2.imread(img0_pth)
     t_img1 = cv2.imread(img1_pth)
-    # Load example images
     img0_raw = cv2.imread(img0_pth, cv2.IMREAD_GRAYSCALE)
     img1_raw = cv2.imread(img1_pth, cv2.IMREAD_GRAYSCALE)
     img0_raw = cv2.resize(img0_raw, (640, 480))
@@ -28,8 +30,8 @@ def Detect_process(img0_pth,img1_pth):
     import datetime
     starttime = datetime.datetime.now()
 
-    img0 = torch.from_numpy(img0_raw)[None][None] / 255.
-    img1 = torch.from_numpy(img1_raw)[None][None] / 255.
+    img0 = torch.from_numpy(img0_raw)[None][None].cuda() / 255.
+    img1 = torch.from_numpy(img1_raw)[None][None].cuda() / 255.
     batch = {'image0': img0, 'image1': img1}
 
     # Inference with LoFTR and get prediction
@@ -56,7 +58,7 @@ def Detect_process(img0_pth,img1_pth):
     concate_img = np.concatenate((next_image2,next_image1))
     cv2.imwrite(r'D:\LoTFR\Result\img.jpg',concate_img)
     """
-    return t_img0,t_img1,mkpts0,mkpts1
+    return mkpts0,mkpts1
 """
 img0_pth = "assets/scannet_sample_images/scene0711_00_frame-001680.jpg"
 img1_pth = "assets/scannet_sample_images/scene0711_00_frame-001995.jpg"
@@ -125,7 +127,7 @@ def compute_corner_based_transformer(corner,kp1,kp2):
 
     return corner2
 
-def Detect_result_based_on_corner(images1,images2,kps1,kps2,corners,seqs):
+def Detect_result_based_on_corner(images1,images2,corners,start,seqs,img_pts1,img_pts2):
     def find_xy_based_corner(corner):
         x_max,y_max = np.array(corner).max(axis=0)
         x_min,y_min = np.array(corner).min(axis=0)
@@ -145,6 +147,12 @@ def Detect_result_based_on_corner(images1,images2,kps1,kps2,corners,seqs):
             except shapely.geos.TopologicalError:
                 iou = 0
         return iou 
+    def Detect_result_based_on_corner_one_corner_pair_sift(image1,image2,corner1,corner2 = None):
+        detect_corner2 = gpu_sift_detect(image1,image2,corner1)
+        print(detect_corner2)
+        if type(detect_corner2) != type(None):
+            return detect_corner2
+        return None
     def Detect_result_based_on_corner_one_corner_pair(image1,image2,kp1,kp2,corner1,corner2 = None):
         ratio_x = float(image1.shape[1]) / 640.0
         ratio_y = float(image1.shape[0]) / 480.0
@@ -165,9 +173,7 @@ def Detect_result_based_on_corner(images1,images2,kps1,kps2,corners,seqs):
                 detect_corner2[i][1] = detect_corner2[i][1] * ratio_y
             return detect_corner2
         return None
-            #image2 = write_corners(image2,detect_corner2,[(255,0,0),(0,255,0),(0,0,255)],0)
-        #concate_img = np.concatenate((image1,image2))
-        #cv2.imwrite('D:\\LoTFR\\Result\\' +'image'+ str(seq) + '.jpg',concate_img)
+    starttime = datetime.datetime.now()
     corner_list = []    #detail of corners
     corner_id_list = []  #class of corners
     corner_image_seq = []   #image_number of corners
@@ -175,26 +181,46 @@ def Detect_result_based_on_corner(images1,images2,kps1,kps2,corners,seqs):
     cur_corner_id_list = []
     cur_corner_image_seq = []
     num_index = 0
-    for seq in range(1500,seqs-1):
+    s_count = 0
+    s_time = 0
+    
+    for seq in range(200000):
         if str(seq) in corners:
             for corner_id in corners[str(seq)]:
                 corner_id_list.append(num_index)
                 num_index+=1
                 corner_list.append(corners[str(seq)][corner_id])
-                corner_image_seq.append(str(seq))
-    for img_seq in range(1500,seqs-1):
+                corner_image_seq.append(str(seq*30+15))
+    print(corner_list,corner_id_list,corner_image_seq)
+    imw_time = 0
+    for img_seq in range(start,seqs-1):
+        starttime = datetime.datetime.now()
         if len(cur_corner_list)!=0 and str(cur_corner_image_seq[len(cur_corner_list)-1])==str(img_seq):
             for i in range(len(cur_corner_list)-1,-1,-1):
                 if str(cur_corner_image_seq[i])!=str(img_seq):
                     break
-                detect_corner2 = Detect_result_based_on_corner_one_corner_pair(images1[img_seq-1500],images2[img_seq-1500],kps1[img_seq-1500],kps2[img_seq-1500],cur_corner_list[i])
-                if detect_corner2 is None:
-                    continue
-                if compare_img_hist(crop_image(images1[img_seq-1500], cur_corner_list[i], extend_ratio=0.1),crop_image(images2[img_seq-1500], detect_corner2, extend_ratio=0.1))<0.5:
+                corner_infor = cur_corner_list[i]
+                corner_img = img_seq
+                for j in range(len(corner_id_list)):
+                    if corner_id_list[j] == cur_corner_id_list[i]:
+                        corner_infor = corner_list[j]
+                        corner_img = corner_image_seq[j]
+                        break
+                detect_corner2 = Detect_result_based_on_corner_one_corner_pair_sift(img_pts1[(int)(corner_img)-start],img_pts2[img_seq-start],corner_infor)
+
+                if detect_corner2 is not None and compare_img_hist(crop_image(images1[img_seq-start], cur_corner_list[i], extend_ratio=0.1),crop_image(images2[img_seq-start], detect_corner2, extend_ratio=0.1))<0.2:
                     cur_corner_list.append(detect_corner2)
                     cur_corner_id_list.append(cur_corner_id_list[i])
                     cur_corner_image_seq.append(img_seq+1)
-            if str(img_seq+1) in corner_image_seq:
+                else:
+                    kps1,kps2 = Detect_process(img_pts1[img_seq-start],img_pts2[img_seq-start])
+                    detect_corner2 = Detect_result_based_on_corner_one_corner_pair(images1[img_seq-start],images2[img_seq-start],kps1,kps2,cur_corner_list[i])
+
+                    if detect_corner2 is not None and compare_img_hist(crop_image(images1[img_seq-start], cur_corner_list[i], extend_ratio=0.1),crop_image(images2[img_seq-start], detect_corner2, extend_ratio=0.1))<0.2:
+                        cur_corner_list.append(detect_corner2)
+                        cur_corner_id_list.append(cur_corner_id_list[i])
+                        cur_corner_image_seq.append(img_seq+1)
+            if  str(img_seq+1) in corner_image_seq:
                 t_corner_list = []    #detail of corners
                 t_corner_id_list = []  #class of corners
                 t_corner_image_seq = []   #image_number of corners
@@ -232,13 +258,22 @@ def Detect_result_based_on_corner(images1,images2,kps1,kps2,corners,seqs):
                     for i in range(len(cur_corner_list)-1,-1,-1):
                         if str(cur_corner_image_seq[i])!=str(img_seq):
                             break
-                        detect_corner2 = Detect_result_based_on_corner_one_corner_pair(images1[img_seq-1500],images2[img_seq-1500],kps1[img_seq-1500],kps2[img_seq-1500],cur_corner_list[i])
-                        if detect_corner2 is None:
-                            continue
-                        if compare_img_hist(crop_image(images1[img_seq-1500], cur_corner_list[i], extend_ratio=0.1),crop_image(images2[img_seq-1500], detect_corner2, extend_ratio=0.1))<0.5:
+                        
+                        detect_corner2 = Detect_result_based_on_corner_one_corner_pair_sift(img_pts1[img_seq-start],img_pts2[img_seq-start],cur_corner_list[i])
+                                 
+                        if detect_corner2 is not None and compare_img_hist(crop_image(images1[img_seq-start], cur_corner_list[i], extend_ratio=0.1),crop_image(images2[img_seq-start], detect_corner2, extend_ratio=0.1))<0.2:
                             cur_corner_list.append(detect_corner2)
                             cur_corner_id_list.append(cur_corner_id_list[i])
                             cur_corner_image_seq.append(img_seq+1)
+                        else:
+                            kps1,kps2 = Detect_process(img_pts1[img_seq-start],img_pts2[img_seq-start])
+
+                            detect_corner2 = Detect_result_based_on_corner_one_corner_pair(images1[img_seq-start],images2[img_seq-start],kps1,kps2,cur_corner_list[i])
+                            if detect_corner2 is not None and compare_img_hist(crop_image(images1[img_seq-start], cur_corner_list[i], extend_ratio=0.1),crop_image(images2[img_seq-start], detect_corner2, extend_ratio=0.1))<0.2:
+                                cur_corner_list.append(detect_corner2)
+                                cur_corner_id_list.append(cur_corner_id_list[i])
+                                cur_corner_image_seq.append(img_seq+1)
+                    
                     if str(img_seq+1) in corner_image_seq:
                         t_corner_list = []    #detail of corners
                         t_corner_id_list = []  #class of corners
@@ -266,10 +301,16 @@ def Detect_result_based_on_corner(images1,images2,kps1,kps2,corners,seqs):
                             cur_corner_list.append(t_corner_list[i])
                             cur_corner_id_list.append(t_corner_id_list[i])
                             cur_corner_image_seq.append(t_corner_image_seq[i])
-        im = images1[img_seq-1500]
+        
+        endtime = datetime.datetime.now()
+        cc = endtime - starttime
+        imw_time += cc.seconds*1000000+cc.microseconds
+
+        im = images1[img_seq-start]
         if len(cur_corner_list)!=0:
             for i in range(len(cur_corner_list)):
                 if(str(cur_corner_image_seq[i])==str(img_seq)):
-                    im = write_corners(images1[img_seq-1500],cur_corner_list[i],color,cur_corner_id_list[i])
-        cv2.imwrite('D:\\LoTFR\\Result\\' +'image'+ str(img_seq) + '.jpg',im)
+                    im = write_corners(images1[img_seq-start],cur_corner_list[i],color,cur_corner_id_list[i])
+        cv2.imwrite('/root/LOFTR/Result_frames/' +'image'+ str(img_seq) + '.jpg',im)
     print(cur_corner_list,cur_corner_id_list,cur_corner_image_seq)
+    print(imw_time)

@@ -177,7 +177,8 @@ def runtime(dictionary_path = 'D:\\Data\\vedio\\vedio_image_with_corners'):
 
 
 def compare_img_hist(img1, img2):
-    
+    if img1 is None or img1 is None:
+        return np.inf
     # Get the histogram data of image 1, then using normalize the picture for better compare
     img1_hist = cv2.calcHist([img1], [1], None, [256], [0, 256])
     img1_hist = cv2.normalize(img1_hist, img1_hist, 0, 1, cv2.NORM_MINMAX, -1)
